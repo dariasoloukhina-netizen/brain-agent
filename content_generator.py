@@ -14,10 +14,19 @@ from email.mime.image import MIMEImage
 from email.mime.base import MIMEBase
 from email import encoders
 
-# ФИХ #2: Используем новый пакет google-genai вместо устаревшего google-generativeai
-# pip install google-genai
-from google import genai
-from google.genai import types
+# Совместимость: пробуем новый пакет google-genai, при неудаче — старый google-generativeai
+_GENAI_SDK = None
+try:
+    from google import genai as _new_genai
+    _GENAI_SDK = "new"
+except ImportError:
+    try:
+        import google.generativeai as _old_genai
+        import warnings
+        warnings.filterwarnings("ignore", category=FutureWarning, module="google")
+        _GENAI_SDK = "old"
+    except ImportError:
+        _GENAI_SDK = None
 
 # ==================== КОНФИГ ====================
 STYLE_PROMPT = (
@@ -78,23 +87,33 @@ FALLBACK_PLAN = {
 }
 
 # ==================== INIT GEMINI ====================
-# ФИХ #2: Инициализация через новый SDK
+# Инициализация Gemini — поддерживаем оба SDK
+client = None  # для нового SDK (google-genai)
+model = None   # для старого SDK (google-generativeai)
+
 try:
-    if GEMINI_KEY:
-        client = genai.Client(api_key=GEMINI_KEY)
-        print("Gemini client initialized (google-genai SDK)")
-    else:
+    if not GEMINI_KEY:
         print("WARNING: No GEMINI_API_KEY set")
-        client = None
+    elif _GENAI_SDK == "new":
+        client = _new_genai.Client(api_key=GEMINI_KEY)
+        print("Gemini initialized via google-genai (new SDK)")
+
+
+
+elif _GENAI_SDK == "old":
+        _old_genai.configure(api_key=GEMINI_KEY)
+        model = _old_genai.GenerativeModel("gemini-2.0-flash")
+        print("Gemini initialized via google-generativeai (old SDK)")
+    else:
+        print("WARNING: No Gemini SDK found. Install google-genai or google-generativeai")
 except Exception as e:
     print(f"WARNING: Gemini init failed: {e}")
-    client = None
 
 # ==================== FUNCTIONS ====================
 def generate_plan():
     """Генерирует план контента через Gemini. При ошибке возвращает fallback."""
-    if not client:
-        print("No Gemini client available, using fallback")
+    if _GENAI_SDK is None or (client is None and model is None):
+        print("No Gemini available, using fallback")
         return FALLBACK_PLAN
 
     topic = random.choice(TOPICS)
@@ -127,13 +146,17 @@ Rules:
 - Output ONLY valid JSON, nothing else"""
 
     try:
-        print("Requesting plan from Gemini...")
-        # ФИХ #2: Новый способ вызова API
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
-        text = response.text.strip()
+        print(f"Requesting plan from Gemini (SDK: {_GENAI_SDK})...")
+
+        if _GENAI_SDK == "new":
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+            text = response.text.strip()
+        else:
+            resp = model.generate_content(prompt)
+            text = resp.text.strip()
 
         print(f"Raw response length: {len(text)} chars")
         print(f"First 200 chars: {text[:200]}")
@@ -149,8 +172,7 @@ Rules:
         print("JSON parsed successfully!")
 
         # Проверяем структуру
-        required_keys = ["pinterest", "telegram", "tiktok"]
-        for key in required_keys:
+        for key in ["pinterest", "telegram", "tiktok"]:
             if key not in plan:
                 print(f"Missing key: {key}, using fallback")
                 return FALLBACK_PLAN
@@ -159,7 +181,7 @@ Rules:
             print("Invalid plan structure, using fallback")
             return FALLBACK_PLAN
 
-        # ФИХ #3: Убеждаемся что у telegram есть prompt, иначе берём из pinterest
+        # Гарантируем наличие prompt у telegram
         if "prompt" not in plan["telegram"]:
             plan["telegram"]["prompt"] = plan["pinterest"]["prompt"]
 
@@ -169,7 +191,6 @@ Rules:
         print(f"ERROR in generate_plan: {type(e).__name__}: {e}")
         print("Using fallback plan")
         return FALLBACK_PLAN
-
 
 def generate_image(prompt, width, height, filename):
     """Генерирует картинку через Pollinations AI."""
@@ -193,8 +214,10 @@ def generate_image(prompt, width, height, filename):
         open(filename, "a").close()
         return filename
 
+def create_tikt
 
-def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
+
+ok_video(bg_path, script, output="tiktok_video.mp4"):
     """Создаёт TikTok-видео через ffmpeg напрямую."""
     print("Rendering TikTok video with ffmpeg...")
 
@@ -269,7 +292,6 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
 
     return output
 
-
 def send_email(subject, body, attachments=None):
     """Отправляет email с вложениями."""
     if not all([EMAIL_FROM, EMAIL_TO, EMAIL_PASS]):
@@ -306,13 +328,18 @@ def send_email(subject, body, attachments=None):
 
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
-            s.starttls()
+            s.starttl
+subprocess — Subprocess management
+subprocess — Subprocess management
+docs.python.org
+
+
+s()
             s.login(EMAIL_FROM, EMAIL_PASS)
             s.send_message(msg)
         print(f"Email sent: {subject}")
     except Exception as e:
         print(f"ERROR sending email: {e}")
-
 
 def post_to_telegram(text, photo_path, video_path=None):
     """Публикует фото и опционально видео в Telegram."""
@@ -360,7 +387,6 @@ def post_to_telegram(text, photo_path, video_path=None):
             print(f"ERROR posting video to Telegram: {e}")
     else:
         print("WARNING: Video missing or empty, skipping Telegram video")
-
 
 def main():
     """Главная функция."""
@@ -418,12 +444,14 @@ def main():
     # 5. Публикуем в Telegram
     try:
         tg_text = f"{plan['telegram']['text']}\n\n{plan['telegram']['cta']}"
-        post_to_telegram(tg_text, tg_img, video_path=video)
+        post_to_telegram(tg_te
+
+
+xt, tg_img, video_path=video)
     except Exception as e:
         print(f"ERROR in Telegram posting: {e}")
 
     print("=== ALL DONE ===")
-
 
 if __name__ == "__main__":
     main()
