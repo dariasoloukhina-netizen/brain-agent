@@ -1,4 +1,6 @@
 google-generativeai
-moviepy
+moviepy==1.0.3
+imageio[ffmpeg]
+numpy<<2
 requests
 Pillow
