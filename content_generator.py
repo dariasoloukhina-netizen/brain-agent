@@ -52,11 +52,11 @@ model = genai.GenerativeModel("gemini-2.0-flash")
 
 def generate_plan():
     topic = random.choice(TOPICS)
-    prompt = f"""
-Ты — контент-креатор в нише mental health, digital wellness, anti-burnout.
+    prompt = f"""Ты — контент-креатор в нише mental health, digital wellness, anti-burnout.
 Тема дня: "{topic}".
 
-Сгенерируй план строго в JSON (без markdown-блоков):
+Сгенерируй план строго в JSON формате. НЕ используй markdown-блоки (не оборачивай в ```json). Просто чистый JSON.
+
 {{
   "pinterest": {{
     "prompt": "detailed english image generation prompt for a pinterest pin, vertical 2:3 ratio, soft aesthetic, cozy, emotional, no text on image",
@@ -76,13 +76,65 @@ def generate_plan():
     "prompt": "detailed english image generation prompt for vertical video background, 9:16 ratio, atmospheric, soft, cinematic mood, no text"
   }}
 }}
-Все тексты — русские (кроме image prompt). Image prompt — английский, подробный.
-"""
+
+Все тексты — русские (кроме image prompt). Image prompt — английский, подробный."""
+    
     resp = model.generate_content(prompt)
     text = resp.text.strip()
+    
+    print(f"RAW RESPONSE FROM GEMINI:\n{text}\n")
+    print(f"RESPONSE TYPE: {type(text)}")
+    
+    # Чистим markdown-обертку если есть
     if text.startswith("```"):
-        text = text.split("```")[1].replace("json", "").strip()
-    return json.loads(text)
+        parts = text.split("```")
+        for part in parts:
+            clean = part.strip().replace("json", "").strip()
+            if clean.startswith("{"):
+                text = clean
+                break
+    
+    text = text.strip()
+    
+    try:
+        plan = json.loads(text)
+        print("JSON parsed successfully")
+        return plan
+    except json.JSONDecodeError as e:
+        print(f"JSON ERROR: {e}")
+        print(f"Trying to extract JSON from text...")
+        # Пытаемся найти JSON в тексте
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start != -1 and end != -1:
+            try:
+                plan = json.loads(text[start:end])
+                print("JSON extracted and parsed")
+                return plan
+            except:
+                pass
+        
+        # Fallback — возвращаем дефолтный план
+        print("Using fallback plan")
+        return {
+            "pinterest": {
+                "prompt": "soft pastel illustration of tired person resting, cozy bedroom, warm light, no text",
+                "title": "Отдых от экранов",
+                "description": "Как вернуть энергию после бесконечного скроллинга."
+            },
+            "telegram": {
+                "text": "Сегодня мы говорим о цифровом выгорании.\n\nСкроллинг ленты часами истощает не только глаза, но и разум.\n\nПопробуй отложить телефон на 30 минут — это уже победа.",
+                "cta": "Как ты борешься с усталостью от экранов? Поделись в комментариях."
+            },
+            "tiktok": {
+                "script": [
+                    "Твои глаза устали от экрана? Это нормально.",
+                    "Цифровое выгорание реально. Ты не один.",
+                    "Поставь телефон в сторону. Вдохни. Выдохни."
+                ],
+                "prompt": "soft illustration of person putting phone away, peaceful moment, pastel colors, warm atmosphere, no text"
+            }
+        }
 
 def generate_image(prompt, width, height, filename):
     full_prompt = f"{prompt}, {STYLE_PROMPT}"
@@ -217,6 +269,7 @@ def main():
     print(f"Старт: {today}")
 
     plan = generate_plan()
+    print(f"Plan keys: {plan.keys() if isinstance(plan, dict) else 'NOT A DICT'}")
 
     pin_img = generate_image(
         plan["pinterest"]["prompt"], 1000, 1500, "pinterest_pin.png"
