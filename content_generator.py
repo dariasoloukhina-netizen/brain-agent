@@ -13,9 +13,38 @@ from email.mime.image import MIMEImage
 from email.mime.base import MIMEBase
 from email import encoders
 
-from moviepy.editor import (
-    ColorClip, ImageClip, TextClip, CompositeVideoClip
-)
+try:
+    from moviepy.editor import (
+        ColorClip, ImageClip, TextClip, CompositeVideoClip
+    )
+    MOVIEPY_AVAILABLE = True
+except ImportError as e:
+    print(f"WARNING: MoviePy not available: {e}")
+    MOVIEPY_AVAILABLE = False
+    # Заглушки для импорта
+    class FakeClip:
+        def __init__(self, *args, **kwargs):
+            pass
+        def set_duration(self, *args):
+            return self
+        def set_position(self, *args):
+            return self
+        def resize(self, *args):
+            return self
+        def set_start(self, *args):
+            return self
+        def fadein(self, *args):
+            return self
+        def fadeout(self, *args):
+            return self
+        def write_videofile(self, *args, **kwargs):
+            print("FAKE: video would be rendered here")
+    
+    ColorClip = FakeClip
+    ImageClip = FakeClip
+    TextClip = FakeClip
+    CompositeVideoClip = lambda *args, **kwargs: FakeClip()
+
 import google.generativeai as genai
 
 # ==================== КОНФИГ ====================
@@ -40,19 +69,17 @@ TOPICS = [
     "mental heaviness after hours of scrolling",
 ]
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-EMAIL_TO = os.environ["EMAIL_TO"]
-EMAIL_FROM = os.environ["EMAIL_FROM"]
-EMAIL_PASS = os.environ["EMAIL_PASSWORD"]
+# ==================== ENV VARS ====================
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+EMAIL_TO = os.environ.get("EMAIL_TO", "")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+EMAIL_PASS = os.environ.get("EMAIL_PASSWORD", "")
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
-
-# ==================== FALLBACK (на случай если Gemini сломается) ====================
+# ==================== FALLBACK ====================
 FALLBACK_PLAN = {
     "pinterest": {
         "prompt": "soft pastel illustration of tired person resting in cozy bed, warm morning light, gentle colors, peaceful atmosphere, no text, no letters, dreamy mood, pinterest style",
@@ -73,8 +100,25 @@ FALLBACK_PLAN = {
     }
 }
 
+# ==================== INIT GEMINI ====================
+try:
+    if GEMINI_KEY:
+        genai.configure(api_key=GEMINI_KEY)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+    else:
+        print("WARNING: No GEMINI_API_KEY set")
+        model = None
+except Exception as e:
+    print(f"WARNING: Gemini init failed: {e}")
+    model = None
+
+# ==================== FUNCTIONS ====================
 def generate_plan():
     """Генерирует план контента через Gemini. При ошибке возвращает fallback."""
+    if not model:
+        print("No Gemini model available, using fallback")
+        return FALLBACK_PLAN
+    
     topic = random.choice(TOPICS)
     
     prompt = f"""Generate a content plan in valid JSON format only. No markdown, no code blocks, no explanations. Just raw JSON.
@@ -113,7 +157,6 @@ Rules:
         
         # Убираем markdown-обёртку если есть
         if "```" in text:
-            # Ищем JSON между ```json и ```
             match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
             if match:
                 text = match.group(1).strip()
@@ -129,6 +172,11 @@ Rules:
             if key not in plan:
                 print(f"Missing key: {key}, using fallback")
                 return FALLBACK_PLAN
+        
+        # Проверяем вложенные ключи
+        if "prompt" not in plan["pinterest"] or "script" not in plan["tiktok"]:
+            print("Invalid plan structure, using fallback")
+            return FALLBACK_PLAN
         
         return plan
         
@@ -146,78 +194,106 @@ def generate_image(prompt, width, height, filename):
         f"?width={width}&height={height}&nologo=true&seed=42&enhance=false"
     )
     print(f"Generating image: {filename} ({width}x{height})...")
-    r = requests.get(url, timeout=120)
-    r.raise_for_status()
-    with open(filename, "wb") as f:
-        f.write(r.content)
-    print(f"Image saved: {filename}")
-    return filename
+    
+    try:
+        r = requests.get(url, timeout=120)
+        r.raise_for_status()
+        with open(filename, "wb") as f:
+            f.write(r.content)
+        print(f"Image saved: {filename} ({len(r.content)} bytes)")
+        return filename
+    except Exception as e:
+        print(f"ERROR generating image: {e}")
+        # Создаём пустой файл-заглушку чтобы не падать дальше
+        open(filename, "a").close()
+        return filename
 
 def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
     """Создаёт TikTok-видео из фона и текста."""
+    if not MOVIEPY_AVAILABLE:
+        print("WARNING: MoviePy not available, creating dummy video file")
+        # Создаём пустой файл чтобы email не упал
+        open(output, "a").close()
+        return output
+    
     print("Rendering TikTok video...")
     duration = 45
     
-    # Фон
-    bg = ColorClip(size=(1080, 1920), color=(245, 243, 240)).set_duration(duration)
-    
-    # Картинка
-    img = (
-        ImageClip(bg_path)
-        .resize(height=1100)
-        .set_position(("center", 180))
-        .set_duration(duration)
-    )
-    
-    clips = [bg, img]
-    starts = [0, 15, 30]
-    durations = [15, 15, 15]
-
-    for txt, start, dur in zip(script, starts, durations):
-        # Белая подложка под текст
-        pad = (
-            ColorClip(size=(1000, 300), color=(255, 255, 255))
-            .set_opacity(0.82)
-            .set_position(("center", 1360))
-            .set_start(start)
-            .set_duration(dur)
-        )
+    try:
+        # Фон
+        bg = ColorClip(size=(1080, 1920), color=(245, 243, 240)).set_duration(duration)
         
-        wrapped = textwrap.fill(txt, width=24)
-        txt_clip = (
-            TextClip(
-                wrapped,
-                fontsize=58,
-                color="#4a4a4a",
-                font="DejaVu-Sans",
-                method="caption",
-                size=(900, None),
-                align="center",
+        # Картинка
+        if os.path.exists(bg_path) and os.path.getsize(bg_path) > 0:
+            img = (
+                ImageClip(bg_path)
+                .resize(height=1100)
+                .set_position(("center", 180))
+                .set_duration(duration)
             )
-            .set_position(("center", 1390))
-            .set_start(start)
-            .set_duration(dur)
-            .fadein(0.8)
-            .fadeout(0.8)
-        )
+            clips = [bg, img]
+        else:
+            print("WARNING: Background image missing or empty, using color only")
+            clips = [bg]
         
-        clips.extend([pad, txt_clip])
+        starts = [0, 15, 30]
+        durations = [15, 15, 15]
 
-    video = CompositeVideoClip(clips, size=(1080, 1920))
-    video.write_videofile(
-        output,
-        fps=24,
-        codec="libx264",
-        audio=False,
-        threads=2,
-        preset="ultrafast",
-        logger=None,
-    )
-    print(f"Video ready: {output}")
-    return output
+        for txt, start, dur in zip(script, starts, durations):
+            # Белая подложка под текст
+            pad = (
+                ColorClip(size=(1000, 300), color=(255, 255, 255))
+                .set_opacity(0.82)
+                .set_position(("center", 1360))
+                .set_start(start)
+                .set_duration(dur)
+            )
+            
+            wrapped = textwrap.fill(txt, width=24)
+            txt_clip = (
+                TextClip(
+                    wrapped,
+                    fontsize=58,
+                    color="#4a4a4a",
+                    font="DejaVu-Sans",
+                    method="caption",
+                    size=(900, None),
+                    align="center",
+                )
+                .set_position(("center", 1390))
+                .set_start(start)
+                .set_duration(dur)
+                .fadein(0.8)
+                .fadeout(0.8)
+            )
+            
+            clips.extend([pad, txt_clip])
+
+        video = CompositeVideoClip(clips, size=(1080, 1920))
+        video.write_videofile(
+            output,
+            fps=24,
+            codec="libx264",
+            audio=False,
+            threads=2,
+            preset="ultrafast",
+            logger=None,
+        )
+        print(f"Video ready: {output}")
+        return output
+        
+    except Exception as e:
+        print(f"ERROR rendering video: {e}")
+        # Создаём пустой файл чтобы email не упал
+        open(output, "a").close()
+        return output
 
 def send_email(subject, body, attachments=None):
     """Отправляет email с вложениями."""
+    if not all([EMAIL_FROM, EMAIL_TO, EMAIL_PASS]):
+        print("WARNING: Email credentials not configured, skipping email")
+        return
+    
     msg = MIMEMultipart()
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
@@ -226,102 +302,153 @@ def send_email(subject, body, attachments=None):
 
     if attachments:
         for path in attachments:
+            if not os.path.exists(path) or os.path.getsize(path) == 0:
+                print(f"WARNING: Attachment {path} missing or empty, skipping")
+                continue
+                
             name = os.path.basename(path)
-            if name.lower().endswith((".png", ".jpg", ".jpeg")):
-                with open(path, "rb") as f:
-                    part = MIMEImage(f.read())
-            else:
-                with open(path, "rb") as f:
-                    part = MIMEBase("application", "octet-stream")
-                    part.set_payload(f.read())
-                    encoders.encode_base64(part)
-            part.add_header("Content-Disposition", "attachment", filename=name)
-            msg.attach(part)
+            try:
+                if name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    with open(path, "rb") as f:
+                        part = MIMEImage(f.read())
+                else:
+                    with open(path, "rb") as f:
+                        part = MIMEBase("application", "octet-stream")
+                        part.set_payload(f.read())
+                        encoders.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment", filename=name)
+                msg.attach(part)
+                print(f"Attached: {name}")
+            except Exception as e:
+                print(f"ERROR attaching {name}: {e}")
 
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
-        s.starttls()
-        s.login(EMAIL_FROM, EMAIL_PASS)
-        s.send_message(msg)
-    print(f"Email sent: {subject}")
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
+            s.starttls()
+            s.login(EMAIL_FROM, EMAIL_PASS)
+            s.send_message(msg)
+        print(f"Email sent: {subject}")
+    except Exception as e:
+        print(f"ERROR sending email: {e}")
 
 def post_to_telegram(text, photo_path, video_path=None):
     """Публикует фото и опционально видео в Telegram."""
+    if not all([TG_TOKEN, TG_CHAT]):
+        print("WARNING: Telegram credentials not configured, skipping Telegram")
+        return
+    
     print("Posting to Telegram...")
     
     # Отправляем фото с текстом
-    url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
-    with open(photo_path, "rb") as f:
-        r = requests.post(
-            url_photo,
-            data={"chat_id": TG_CHAT, "caption": text, "parse_mode": "HTML"},
-            files={"photo": f},
-            timeout=30,
-        )
-    
-    if r.status_code == 200:
-        print("Telegram: photo posted")
+    if os.path.exists(photo_path) and os.path.getsize(photo_path) > 0:
+        try:
+            url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
+            with open(photo_path, "rb") as f:
+                r = requests.post(
+                    url_photo,
+                    data={"chat_id": TG_CHAT, "caption": text, "parse_mode": "HTML"},
+                    files={"photo": f},
+                    timeout=30,
+                )
+            
+            if r.status_code == 200:
+                print("Telegram: photo posted")
+            else:
+                print(f"Telegram photo error {r.status_code}: {r.text}")
+        except Exception as e:
+            print(f"ERROR posting photo to Telegram: {e}")
     else:
-        print(f"Telegram photo error {r.status_code}: {r.text}")
+        print("WARNING: Photo missing or empty, skipping Telegram photo")
     
     # Отправляем видео отдельно если есть
-    if video_path and os.path.exists(video_path):
-        print("Sending video to Telegram...")
-        url_video = f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo"
-        with open(video_path, "rb") as f:
-            r = requests.post(
-                url_video,
-                data={"chat_id": TG_CHAT, "caption": "Видео для TikTok", "parse_mode": "HTML"},
-                files={"video": f},
-                timeout=60,
-            )
-        if r.status_code == 200:
-            print("Telegram: video posted")
-        else:
-            print(f"Telegram video error {r.status_code}: {r.text}")
+    if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+        try:
+            print("Sending video to Telegram...")
+            url_video = f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo"
+            with open(video_path, "rb") as f:
+                r = requests.post(
+                    url_video,
+                    data={"chat_id": TG_CHAT, "caption": "Видео для TikTok", "parse_mode": "HTML"},
+                    files={"video": f},
+                    timeout=60,
+                )
+            if r.status_code == 200:
+                print("Telegram: video posted")
+            else:
+                print(f"Telegram video error {r.status_code}: {r.text}")
+        except Exception as e:
+            print(f"ERROR posting video to Telegram: {e}")
+    else:
+        print("WARNING: Video missing or empty, skipping Telegram video")
 
 def main():
     """Главная функция."""
     today = datetime.now().strftime("%d.%m.%Y %H:%M")
     print(f"=== START: {today} ===")
+    print(f"MoviePy available: {MOVIEPY_AVAILABLE}")
+    print(f"Gemini model: {'OK' if model else 'NOT AVAILABLE'}")
 
     # 1. Генерируем план (с fallback при ошибке)
     plan = generate_plan()
-    print(f"Plan keys: {list(plan.keys())}")
+    print(f"Plan keys: {list(plan.keys()) if isinstance(plan, dict) else 'INVALID'}")
 
     # 2. Генерируем картинки
-    pin_img = generate_image(
-        plan["pinterest"]["prompt"], 1000, 1500, "pinterest_pin.png"
-    )
+    try:
+        pin_img = generate_image(
+            plan["pinterest"]["prompt"], 1000, 1500, "pinterest_pin.png"
+        )
+    except Exception as e:
+        print(f"ERROR generating pin image: {e}")
+        pin_img = "pinterest_pin.png"
     
-    tg_img = generate_image(
-        plan["telegram"].get("prompt", plan["pinterest"]["prompt"]),
-        1080, 1080, "telegram_post.png",
-    )
+    try:
+        tg_img = generate_image(
+            plan["telegram"].get("prompt", plan["pinterest"]["prompt"]),
+            1080, 1080, "telegram_post.png",
+        )
+    except Exception as e:
+        print(f"ERROR generating telegram image: {e}")
+        tg_img = "telegram_post.png"
     
-    tiktok_bg = generate_image(
-        plan["tiktok"]["prompt"], 1080, 1920, "tiktok_bg.png"
-    )
+    try:
+        tiktok_bg = generate_image(
+            plan["tiktok"]["prompt"], 1080, 1920, "tiktok_bg.png"
+        )
+    except Exception as e:
+        print(f"ERROR generating tiktok background: {e}")
+        tiktok_bg = "tiktok_bg.png"
 
     # 3. Создаём видео
-    video = create_tiktok_video(tiktok_bg, plan["tiktok"]["script"])
+    try:
+        video = create_tiktok_video(tiktok_bg, plan["tiktok"]["script"])
+    except Exception as e:
+        print(f"ERROR creating video: {e}")
+        video = "tiktok_video.mp4"
+        open(video, "a").close()
 
     # 4. Отправляем email
-    email_body = f"""Pinterest: {plan['pinterest']['title']}
+    try:
+        email_body = f"""Pinterest: {plan['pinterest']['title']}
 
 {plan['pinterest']['description']}
 
 TikTok video (45 sec) and Pinterest image attached.
 Generated: {today}"""
-    
-    send_email(
-        f"Content for {today} — Pinterest + TikTok",
-        email_body,
-        attachments=[pin_img, video],
-    )
+        
+        send_email(
+            f"Content for {today} — Pinterest + TikTok",
+            email_body,
+            attachments=[pin_img, video],
+        )
+    except Exception as e:
+        print(f"ERROR in email sending: {e}")
 
     # 5. Публикуем в Telegram
-    tg_text = f"{plan['telegram']['text']}\n\n{plan['telegram']['cta']}"
-    post_to_telegram(tg_text, tg_img, video_path=video)
+    try:
+        tg_text = f"{plan['telegram']['text']}\n\n{plan['telegram']['cta']}"
+        post_to_telegram(tg_text, tg_img, video_path=video)
+    except Exception as e:
+        print(f"ERROR in Telegram posting: {e}")
 
     print("=== ALL DONE ===")
 
