@@ -5,6 +5,7 @@ import textwrap
 import urllib.parse
 import smtplib
 import requests
+import re
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,6 +18,7 @@ from moviepy.editor import (
 )
 import google.generativeai as genai
 
+# ==================== КОНФИГ ====================
 STYLE_PROMPT = (
     "soft minimalist digital illustration, muted pastel colors, flat design, "
     "gentle gradients, cozy aesthetic, clean composition, no text, no watermark, "
@@ -50,122 +52,129 @@ TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
 genai.configure(api_key=GEMINI_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash")
 
+# ==================== FALLBACK (на случай если Gemini сломается) ====================
+FALLBACK_PLAN = {
+    "pinterest": {
+        "prompt": "soft pastel illustration of tired person resting in cozy bed, warm morning light, gentle colors, peaceful atmosphere, no text, no letters, dreamy mood, pinterest style",
+        "title": "Разрешите себе отдохнуть",
+        "description": "Ваш мозг устал не от работы, а от бесконечного потока информации. Сегодня — день, чтобы остановиться."
+    },
+    "telegram": {
+        "text": "Сегодня поговорим о том, почему мы чувствуем усталость, даже если \"ничего не делали\".\n\nБесконечный скроллинг ленты — это не отдых. Это нагрузка на мозг, который пытается обработать сотни образов за минуту.\n\nПопробуйте отложить телефон на 20 минут. Просто посидите в тишине. Это уже забота о себе.",
+        "cta": "Как вы отдыхаете от экранов? Поделитесь в комментариях."
+    },
+    "tiktok": {
+        "script": [
+            "Ты устал, хотя целый день \"ничего не делал\"?",
+            "Бесконечный скроллинг — это не отдых. Это нагрузка.",
+            "Поставь телефон в сторону. Вдохни. Ты заслуживаешь покоя."
+        ],
+        "prompt": "soft illustration of hand putting phone away, peaceful sunset colors, warm atmosphere, pastel tones, cinematic mood, no text"
+    }
+}
+
 def generate_plan():
+    """Генерирует план контента через Gemini. При ошибке возвращает fallback."""
     topic = random.choice(TOPICS)
-    prompt = f"""Ты — контент-креатор в нише mental health, digital wellness, anti-burnout.
-Тема дня: "{topic}".
+    
+    prompt = f"""Generate a content plan in valid JSON format only. No markdown, no code blocks, no explanations. Just raw JSON.
 
-Сгенерируй план строго в JSON формате. НЕ используй markdown-блоки (не оборачивай в ```json). Просто чистый JSON.
+Topic: {topic}
 
+Required structure:
 {{
   "pinterest": {{
-    "prompt": "detailed english image generation prompt for a pinterest pin, vertical 2:3 ratio, soft aesthetic, cozy, emotional, no text on image",
-    "title": "заголовок пина на русском, 3-7 слов",
-    "description": "описание пина на русском, 1-2 предложения"
+    "prompt": "english image prompt for pinterest pin, vertical 2:3, soft aesthetic, no text",
+    "title": "russian title 3-7 words",
+    "description": "russian description 1-2 sentences"
   }},
   "telegram": {{
-    "text": "текст поста для Telegram на русском, 3-5 коротких абзацев, бережный тон, эмодзи",
-    "cta": "короткий призыв в конце"
+    "text": "russian post text 3-5 paragraphs, gentle tone, emojis",
+    "cta": "russian call to action"
   }},
   "tiktok": {{
-    "script": [
-      "текст на экране, сцена 1, ~12 сек",
-      "текст на экране, сцена 2, ~16 сек",
-      "текст на экране, сцена 3, ~17 сек"
-    ],
-    "prompt": "detailed english image generation prompt for vertical video background, 9:16 ratio, atmospheric, soft, cinematic mood, no text"
+    "script": ["scene 1 text ~12 sec", "scene 2 text ~16 sec", "scene 3 text ~17 sec"],
+    "prompt": "english image prompt for 9:16 video background, atmospheric, no text"
   }}
 }}
 
-Все тексты — русские (кроме image prompt). Image prompt — английский, подробный."""
-    
-    resp = model.generate_content(prompt)
-    text = resp.text.strip()
-    
-    print(f"RAW RESPONSE FROM GEMINI:\n{text}\n")
-    print(f"RESPONSE TYPE: {type(text)}")
-    
-    # Чистим markdown-обертку если есть
-    if text.startswith("```"):
-        parts = text.split("```")
-        for part in parts:
-            clean = part.strip().replace("json", "").strip()
-            if clean.startswith("{"):
-                text = clean
-                break
-    
-    text = text.strip()
+Rules:
+- All text fields must be in Russian (except image prompts which must be in English)
+- Image prompts must be detailed and descriptive
+- Output ONLY valid JSON, nothing else"""
     
     try:
-        plan = json.loads(text)
-        print("JSON parsed successfully")
-        return plan
-    except json.JSONDecodeError as e:
-        print(f"JSON ERROR: {e}")
-        print(f"Trying to extract JSON from text...")
-        # Пытаемся найти JSON в тексте
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start != -1 and end != -1:
-            try:
-                plan = json.loads(text[start:end])
-                print("JSON extracted and parsed")
-                return plan
-            except:
-                pass
+        print("Requesting plan from Gemini...")
+        resp = model.generate_content(prompt)
+        text = resp.text.strip()
         
-        # Fallback — возвращаем дефолтный план
+        print(f"Raw response length: {len(text)} chars")
+        print(f"First 200 chars: {text[:200]}")
+        
+        # Убираем markdown-обёртку если есть
+        if "```" in text:
+            # Ищем JSON между ```json и ```
+            match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+                print("Extracted JSON from markdown block")
+        
+        # Пробуем парсить
+        plan = json.loads(text)
+        print("JSON parsed successfully!")
+        
+        # Проверяем структуру
+        required_keys = ["pinterest", "telegram", "tiktok"]
+        for key in required_keys:
+            if key not in plan:
+                print(f"Missing key: {key}, using fallback")
+                return FALLBACK_PLAN
+        
+        return plan
+        
+    except Exception as e:
+        print(f"ERROR in generate_plan: {type(e).__name__}: {e}")
         print("Using fallback plan")
-        return {
-            "pinterest": {
-                "prompt": "soft pastel illustration of tired person resting, cozy bedroom, warm light, no text",
-                "title": "Отдых от экранов",
-                "description": "Как вернуть энергию после бесконечного скроллинга."
-            },
-            "telegram": {
-                "text": "Сегодня мы говорим о цифровом выгорании.\n\nСкроллинг ленты часами истощает не только глаза, но и разум.\n\nПопробуй отложить телефон на 30 минут — это уже победа.",
-                "cta": "Как ты борешься с усталостью от экранов? Поделись в комментариях."
-            },
-            "tiktok": {
-                "script": [
-                    "Твои глаза устали от экрана? Это нормально.",
-                    "Цифровое выгорание реально. Ты не один.",
-                    "Поставь телефон в сторону. Вдохни. Выдохни."
-                ],
-                "prompt": "soft illustration of person putting phone away, peaceful moment, pastel colors, warm atmosphere, no text"
-            }
-        }
+        return FALLBACK_PLAN
 
 def generate_image(prompt, width, height, filename):
+    """Генерирует картинку через Pollinations AI."""
     full_prompt = f"{prompt}, {STYLE_PROMPT}"
     encoded = urllib.parse.quote(full_prompt)
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?width={width}&height={height}&nologo=true&seed=42&enhance=false"
     )
-    print(f"Генерация {filename} ({width}x{height})...")
+    print(f"Generating image: {filename} ({width}x{height})...")
     r = requests.get(url, timeout=120)
     r.raise_for_status()
     with open(filename, "wb") as f:
         f.write(r.content)
-    print(f"Сохранено: {filename}")
+    print(f"Image saved: {filename}")
     return filename
 
 def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
-    print("Рендер TikTok видео...")
+    """Создаёт TikTok-видео из фона и текста."""
+    print("Rendering TikTok video...")
     duration = 45
+    
+    # Фон
     bg = ColorClip(size=(1080, 1920), color=(245, 243, 240)).set_duration(duration)
+    
+    # Картинка
     img = (
         ImageClip(bg_path)
         .resize(height=1100)
         .set_position(("center", 180))
         .set_duration(duration)
     )
+    
     clips = [bg, img]
     starts = [0, 15, 30]
     durations = [15, 15, 15]
 
     for txt, start, dur in zip(script, starts, durations):
+        # Белая подложка под текст
         pad = (
             ColorClip(size=(1000, 300), color=(255, 255, 255))
             .set_opacity(0.82)
@@ -173,6 +182,7 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
             .set_start(start)
             .set_duration(dur)
         )
+        
         wrapped = textwrap.fill(txt, width=24)
         txt_clip = (
             TextClip(
@@ -190,6 +200,7 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
             .fadein(0.8)
             .fadeout(0.8)
         )
+        
         clips.extend([pad, txt_clip])
 
     video = CompositeVideoClip(clips, size=(1080, 1920))
@@ -202,10 +213,11 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
         preset="ultrafast",
         logger=None,
     )
-    print(f"Видео готово: {output}")
+    print(f"Video ready: {output}")
     return output
 
 def send_email(subject, body, attachments=None):
+    """Отправляет email с вложениями."""
     msg = MIMEMultipart()
     msg["From"] = EMAIL_FROM
     msg["To"] = EMAIL_TO
@@ -230,11 +242,13 @@ def send_email(subject, body, attachments=None):
         s.starttls()
         s.login(EMAIL_FROM, EMAIL_PASS)
         s.send_message(msg)
-    print(f"Email отправлен: {subject}")
+    print(f"Email sent: {subject}")
 
 def post_to_telegram(text, photo_path, video_path=None):
-    print("Постинг в Telegram...")
+    """Публикует фото и опционально видео в Telegram."""
+    print("Posting to Telegram...")
     
+    # Отправляем фото с текстом
     url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     with open(photo_path, "rb") as f:
         r = requests.post(
@@ -245,12 +259,13 @@ def post_to_telegram(text, photo_path, video_path=None):
         )
     
     if r.status_code == 200:
-        print("Telegram: фото опубликовано")
+        print("Telegram: photo posted")
     else:
-        print(f"Telegram ошибка при отправке фото {r.status_code}: {r.text}")
+        print(f"Telegram photo error {r.status_code}: {r.text}")
     
+    # Отправляем видео отдельно если есть
     if video_path and os.path.exists(video_path):
-        print("Отправка видео в Telegram...")
+        print("Sending video to Telegram...")
         url_video = f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo"
         with open(video_path, "rb") as f:
             r = requests.post(
@@ -260,46 +275,55 @@ def post_to_telegram(text, photo_path, video_path=None):
                 timeout=60,
             )
         if r.status_code == 200:
-            print("Telegram: видео опубликовано")
+            print("Telegram: video posted")
         else:
-            print(f"Telegram ошибка при отправке видео {r.status_code}: {r.text}")
+            print(f"Telegram video error {r.status_code}: {r.text}")
 
 def main():
+    """Главная функция."""
     today = datetime.now().strftime("%d.%m.%Y %H:%M")
-    print(f"Старт: {today}")
+    print(f"=== START: {today} ===")
 
+    # 1. Генерируем план (с fallback при ошибке)
     plan = generate_plan()
-    print(f"Plan keys: {plan.keys() if isinstance(plan, dict) else 'NOT A DICT'}")
+    print(f"Plan keys: {list(plan.keys())}")
 
+    # 2. Генерируем картинки
     pin_img = generate_image(
         plan["pinterest"]["prompt"], 1000, 1500, "pinterest_pin.png"
     )
+    
     tg_img = generate_image(
         plan["telegram"].get("prompt", plan["pinterest"]["prompt"]),
         1080, 1080, "telegram_post.png",
     )
+    
     tiktok_bg = generate_image(
         plan["tiktok"]["prompt"], 1080, 1920, "tiktok_bg.png"
     )
 
+    # 3. Создаём видео
     video = create_tiktok_video(tiktok_bg, plan["tiktok"]["script"])
 
+    # 4. Отправляем email
     email_body = f"""Pinterest: {plan['pinterest']['title']}
 
 {plan['pinterest']['description']}
 
-TikTok видео (45 сек) и Pinterest-картинка во вложении.
-Дата генерации: {today}"""
+TikTok video (45 sec) and Pinterest image attached.
+Generated: {today}"""
+    
     send_email(
-        f"Контент на {today} — Pinterest + TikTok",
+        f"Content for {today} — Pinterest + TikTok",
         email_body,
         attachments=[pin_img, video],
     )
 
+    # 5. Публикуем в Telegram
     tg_text = f"{plan['telegram']['text']}\n\n{plan['telegram']['cta']}"
     post_to_telegram(tg_text, tg_img, video_path=video)
 
-    print("Всё готово!")
+    print("=== ALL DONE ===")
 
 if __name__ == "__main__":
     main()
