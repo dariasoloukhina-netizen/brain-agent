@@ -6,44 +6,13 @@ import urllib.parse
 import smtplib
 import requests
 import re
+import subprocess
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from email.mime.base import MIMEBase
 from email import encoders
-
-try:
-    from moviepy.editor import (
-        ColorClip, ImageClip, TextClip, CompositeVideoClip
-    )
-    MOVIEPY_AVAILABLE = True
-except ImportError as e:
-    print(f"WARNING: MoviePy not available: {e}")
-    MOVIEPY_AVAILABLE = False
-    # Заглушки для импорта
-    class FakeClip:
-        def __init__(self, *args, **kwargs):
-            pass
-        def set_duration(self, *args):
-            return self
-        def set_position(self, *args):
-            return self
-        def resize(self, *args):
-            return self
-        def set_start(self, *args):
-            return self
-        def fadein(self, *args):
-            return self
-        def fadeout(self, *args):
-            return self
-        def write_videofile(self, *args, **kwargs):
-            print("FAKE: video would be rendered here")
-    
-    ColorClip = FakeClip
-    ImageClip = FakeClip
-    TextClip = FakeClip
-    CompositeVideoClip = lambda *args, **kwargs: FakeClip()
 
 import google.generativeai as genai
 
@@ -209,82 +178,97 @@ def generate_image(prompt, width, height, filename):
         return filename
 
 def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
-    """Создаёт TikTok-видео из фона и текста."""
-    if not MOVIEPY_AVAILABLE:
-        print("WARNING: MoviePy not available, creating dummy video file")
-        # Создаём пустой файл чтобы email не упал
+    """Создаёт TikTok-видео через ffmpeg напрямую (без MoviePy)."""
+    print("Rendering TikTok video with ffmpeg...")
+    
+    # Проверяем что ffmpeg есть
+    try:
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+        print("ffmpeg found")
+    except:
+        print("WARNING: ffmpeg not found, creating dummy video file")
         open(output, "a").close()
         return output
     
-    print("Rendering TikTok video...")
-    duration = 45
+    # Проверяем фон
+    if not os.path.exists(bg_path) or os.path.getsize(bg_path) == 0:
+        print("WARNING: Background image missing or empty, using color background")
+        # Создаём одноцветный фон через ffmpeg
+        bg_filter = "color=c=0xF5F3F0:s=1080x1920:d=45"
+    else:
+        bg_filter = f"loop=loop=-1:size=1:start=0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:0xF5F3F0"
+        bg_input = ["-i", bg_path]
     
+    # Создаём текстовые оверлеи для каждой сцены
+    # Сцена 1: 0-15 сек
+    # Сцена 2: 15-30 сек  
+    # Сцена 3: 30-45 сек
+    
+    drawtext_filters = []
+    for i, txt in enumerate(script):
+        start = i * 15
+        end = (i + 1) * 15
+        # Экранируем спецсимволы для ffmpeg
+        safe_txt = txt.replace("'", "'\\''").replace(":", "\\:").replace("=", "\\=")
+        # Разбиваем на строки
+        wrapped = textwrap.fill(safe_txt, width=20)
+        lines = wrapped.split("\n")
+        
+        # Создаём drawtext для каждой строки
+        y_start = 1400
+        for j, line in enumerate(lines):
+            y_pos = y_start + j * 70
+            filter_str = (
+                f"drawtext=text='{line}':"
+                f"fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
+                f"fontsize=50:fontcolor=#4a4a4a:"
+                f"x=(w-text_w)/2:y={y_pos}:"
+                f"enable='between(t,{start},{end})':"
+                f"box=1:boxcolor=white@0.8:boxborderw=20"
+            )
+            drawtext_filters.append(filter_str)
+    
+    # Собираем фильтр
+    if not os.path.exists(bg_path) or os.path.getsize(bg_path) == 0:
+        # Одноцветный фон
+        filter_complex = f"{bg_filter}[v0];" + ";".join(
+            f"[v{i}]{f}[v{i+1}]" for i, f in enumerate(drawtext_filters)
+        ) if drawtext_filters else ""
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c=0xF5F3F0:s=1080x1920:d=45",
+            "-vf", ",".join(drawtext_filters) if drawtext_filters else "null",
+            "-c:v", "libx264", "-t", "45", "-pix_fmt", "yuv420p",
+            "-preset", "ultrafast", "-threads", "2",
+            output
+        ]
+    else:
+        # Фон из картинки
+        filter_parts = [f"loop=loop=-1:size=1:start=0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:0xF5F3F0"]
+        filter_parts.extend(drawtext_filters)
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", bg_path,
+            "-vf", ",".join(filter_parts),
+            "-c:v", "libx264", "-t", "45", "-pix_fmt", "yuv420p",
+            "-preset", "ultrafast", "-threads", "2",
+            output
+        ]
+    
+    print(f"Running ffmpeg command...")
     try:
-        # Фон
-        bg = ColorClip(size=(1080, 1920), color=(245, 243, 240)).set_duration(duration)
-        
-        # Картинка
-        if os.path.exists(bg_path) and os.path.getsize(bg_path) > 0:
-            img = (
-                ImageClip(bg_path)
-                .resize(height=1100)
-                .set_position(("center", 180))
-                .set_duration(duration)
-            )
-            clips = [bg, img]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
+            print(f"Video ready: {output}")
+            return output
         else:
-            print("WARNING: Background image missing or empty, using color only")
-            clips = [bg]
-        
-        starts = [0, 15, 30]
-        durations = [15, 15, 15]
-
-        for txt, start, dur in zip(script, starts, durations):
-            # Белая подложка под текст
-            pad = (
-                ColorClip(size=(1000, 300), color=(255, 255, 255))
-                .set_opacity(0.82)
-                .set_position(("center", 1360))
-                .set_start(start)
-                .set_duration(dur)
-            )
-            
-            wrapped = textwrap.fill(txt, width=24)
-            txt_clip = (
-                TextClip(
-                    wrapped,
-                    fontsize=58,
-                    color="#4a4a4a",
-                    font="DejaVu-Sans",
-                    method="caption",
-                    size=(900, None),
-                    align="center",
-                )
-                .set_position(("center", 1390))
-                .set_start(start)
-                .set_duration(dur)
-                .fadein(0.8)
-                .fadeout(0.8)
-            )
-            
-            clips.extend([pad, txt_clip])
-
-        video = CompositeVideoClip(clips, size=(1080, 1920))
-        video.write_videofile(
-            output,
-            fps=24,
-            codec="libx264",
-            audio=False,
-            threads=2,
-            preset="ultrafast",
-            logger=None,
-        )
-        print(f"Video ready: {output}")
-        return output
-        
+            print(f"ffmpeg error: {result.stderr[:500]}")
+            open(output, "a").close()
+            return output
     except Exception as e:
-        print(f"ERROR rendering video: {e}")
-        # Создаём пустой файл чтобы email не упал
+        print(f"ERROR running ffmpeg: {e}")
         open(output, "a").close()
         return output
 
@@ -354,7 +338,7 @@ def post_to_telegram(text, photo_path, video_path=None):
             if r.status_code == 200:
                 print("Telegram: photo posted")
             else:
-                print(f"Telegram photo error {r.status_code}: {r.text}")
+                print(f"Telegram photo error {r.status_code}: {r.text[:200]}")
         except Exception as e:
             print(f"ERROR posting photo to Telegram: {e}")
     else:
@@ -375,7 +359,7 @@ def post_to_telegram(text, photo_path, video_path=None):
             if r.status_code == 200:
                 print("Telegram: video posted")
             else:
-                print(f"Telegram video error {r.status_code}: {r.text}")
+                print(f"Telegram video error {r.status_code}: {r.text[:200]}")
         except Exception as e:
             print(f"ERROR posting video to Telegram: {e}")
     else:
@@ -385,8 +369,6 @@ def main():
     """Главная функция."""
     today = datetime.now().strftime("%d.%m.%Y %H:%M")
     print(f"=== START: {today} ===")
-    print(f"MoviePy available: {MOVIEPY_AVAILABLE}")
-    print(f"Gemini model: {'OK' if model else 'NOT AVAILABLE'}")
 
     # 1. Генерируем план (с fallback при ошибке)
     plan = generate_plan()
