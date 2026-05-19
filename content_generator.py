@@ -181,10 +181,8 @@ def send_email(subject, body, attachments=None):
     print(f"Email отправлен: {subject}")
 
 def post_to_telegram(text, photo_path, video_path=None):
-    """Отправка фото и опционально видео в Telegram"""
     print("Постинг в Telegram...")
     
-    # Сначала отправляем фото с текстом
     url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
     with open(photo_path, "rb") as f:
         r = requests.post(
@@ -199,7 +197,6 @@ def post_to_telegram(text, photo_path, video_path=None):
     else:
         print(f"Telegram ошибка при отправке фото {r.status_code}: {r.text}")
     
-    # Если есть видео — отправляем отдельным сообщением
     if video_path and os.path.exists(video_path):
         print("Отправка видео в Telegram...")
         url_video = f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo"
