@@ -16,7 +16,6 @@ from email import encoders
 
 import google.generativeai as genai
 
-# ==================== КОНФИГ ====================
 STYLE_PROMPT = (
     "soft minimalist digital illustration, muted pastel colors, flat design, "
     "gentle gradients, cozy aesthetic, clean composition, no text, no watermark, "
@@ -38,17 +37,16 @@ TOPICS = [
     "mental heaviness after hours of scrolling",
 ]
 
-# ==================== ENV VARS ====================
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_PASS = os.environ.get("EMAIL_PASSWORD", "")
 SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_PORT_STR = os.environ.get("SMTP_PORT", "587")
+SMTP_PORT = int(SMTP_PORT_STR) if SMTP_PORT_STR.strip() else 587
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# ==================== FALLBACK ====================
 FALLBACK_PLAN = {
     "pinterest": {
         "prompt": "soft pastel illustration of tired person resting in cozy bed, warm morning light, gentle colors, peaceful atmosphere, no text, no letters, dreamy mood, pinterest style",
@@ -69,7 +67,6 @@ FALLBACK_PLAN = {
     }
 }
 
-# ==================== INIT GEMINI ====================
 try:
     if GEMINI_KEY:
         genai.configure(api_key=GEMINI_KEY)
@@ -81,9 +78,7 @@ except Exception as e:
     print(f"WARNING: Gemini init failed: {e}")
     model = None
 
-# ==================== FUNCTIONS ====================
 def generate_plan():
-    """Генерирует план контента через Gemini. При ошибке возвращает fallback."""
     if not model:
         print("No Gemini model available, using fallback")
         return FALLBACK_PLAN
@@ -124,25 +119,21 @@ Rules:
         print(f"Raw response length: {len(text)} chars")
         print(f"First 200 chars: {text[:200]}")
         
-        # Убираем markdown-обёртку если есть
         if "```" in text:
             match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
             if match:
                 text = match.group(1).strip()
                 print("Extracted JSON from markdown block")
         
-        # Пробуем парсить
         plan = json.loads(text)
         print("JSON parsed successfully!")
         
-        # Проверяем структуру
         required_keys = ["pinterest", "telegram", "tiktok"]
         for key in required_keys:
             if key not in plan:
                 print(f"Missing key: {key}, using fallback")
                 return FALLBACK_PLAN
         
-        # Проверяем вложенные ключи
         if "prompt" not in plan["pinterest"] or "script" not in plan["tiktok"]:
             print("Invalid plan structure, using fallback")
             return FALLBACK_PLAN
@@ -155,7 +146,6 @@ Rules:
         return FALLBACK_PLAN
 
 def generate_image(prompt, width, height, filename):
-    """Генерирует картинку через Pollinations AI."""
     full_prompt = f"{prompt}, {STYLE_PROMPT}"
     encoded = urllib.parse.quote(full_prompt)
     url = (
@@ -177,10 +167,8 @@ def generate_image(prompt, width, height, filename):
         return filename
 
 def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
-    """Создаёт TikTok-видео через ffmpeg напрямую."""
     print("Rendering TikTok video with ffmpeg...")
     
-    # Проверяем что ffmpeg есть
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
         print("ffmpeg found")
@@ -189,16 +177,12 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
         open(output, "a").close()
         return output
     
-    # Проверяем фон
     has_bg = os.path.exists(bg_path) and os.path.getsize(bg_path) > 0
     
-    # Создаём текстовые оверлеи для каждой сцены
     drawtext_filters = []
     for i, txt in enumerate(script):
         start = i * 15
-        # Экранируем спецсимволы для ffmpeg
         safe_txt = txt.replace("'", "").replace(":", "").replace("=", "")
-        # Разбиваем на строки
         wrapped = textwrap.fill(safe_txt, width=20)
         lines = wrapped.split("\n")
         
@@ -215,7 +199,6 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
             )
             drawtext_filters.append(filter_str)
     
-    # Собираем команду ffmpeg
     if has_bg:
         filter_parts = [
             "loop=loop=-1:size=1:start=0",
@@ -233,7 +216,6 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
             output
         ]
     else:
-        # Одноцветный фон
         filter_parts = drawtext_filters
         
         cmd = [
@@ -261,7 +243,6 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
         return output
 
 def send_email(subject, body, attachments=None):
-    """Отправляет email с вложениями."""
     if not all([EMAIL_FROM, EMAIL_TO, EMAIL_PASS]):
         print("WARNING: Email credentials not configured, skipping email")
         return
@@ -304,14 +285,12 @@ def send_email(subject, body, attachments=None):
         print(f"ERROR sending email: {e}")
 
 def post_to_telegram(text, photo_path, video_path=None):
-    """Публикует фото и опционально видео в Telegram."""
     if not all([TG_TOKEN, TG_CHAT]):
         print("WARNING: Telegram credentials not configured, skipping Telegram")
         return
     
     print("Posting to Telegram...")
     
-    # Отправляем фото с текстом
     if os.path.exists(photo_path) and os.path.getsize(photo_path) > 0:
         try:
             url_photo = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
@@ -332,7 +311,6 @@ def post_to_telegram(text, photo_path, video_path=None):
     else:
         print("WARNING: Photo missing or empty, skipping Telegram photo")
     
-    # Отправляем видео отдельно если есть
     if video_path and os.path.exists(video_path) and os.path.getsize(video_path) > 0:
         try:
             print("Sending video to Telegram...")
@@ -354,15 +332,12 @@ def post_to_telegram(text, photo_path, video_path=None):
         print("WARNING: Video missing or empty, skipping Telegram video")
 
 def main():
-    """Главная функция."""
     today = datetime.now().strftime("%d.%m.%Y %H:%M")
     print(f"=== START: {today} ===")
 
-    # 1. Генерируем план
     plan = generate_plan()
     print(f"Plan keys: {list(plan.keys()) if isinstance(plan, dict) else 'INVALID'}")
 
-    # 2. Генерируем картинки
     try:
         pin_img = generate_image(
             plan["pinterest"]["prompt"], 1000, 1500, "pinterest_pin.png"
@@ -388,7 +363,6 @@ def main():
         print(f"ERROR generating tiktok background: {e}")
         tiktok_bg = "tiktok_bg.png"
 
-    # 3. Создаём видео
     try:
         video = create_tiktok_video(tiktok_bg, plan["tiktok"]["script"])
     except Exception as e:
@@ -396,7 +370,6 @@ def main():
         video = "tiktok_video.mp4"
         open(video, "a").close()
 
-    # 4. Отправляем email
     try:
         email_body = f"""Pinterest: {plan['pinterest']['title']}
 
@@ -413,7 +386,6 @@ Generated: {today}"""
     except Exception as e:
         print(f"ERROR in email sending: {e}")
 
-    # 5. Публикуем в Telegram
     try:
         tg_text = f"{plan['telegram']['text']}\n\n{plan['telegram']['cta']}"
         post_to_telegram(tg_text, tg_img, video_path=video)
