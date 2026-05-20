@@ -21,9 +21,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 try:
     import google.generativeai as genai
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY", ""))
-    # gemini-1.5-flash имеет более высокий бесплатный лимит чем gemini-2.0-flash
-    GEMINI_MODEL = genai.GenerativeModel("gemini-1.5-flash")
-    print("Gemini SDK loaded OK (gemini-1.5-flash)")
+    # gemini-2.0-flash-lite имеет более высокий бесплатный лимит чем gemini-2.0-flash
+    GEMINI_MODEL = genai.GenerativeModel("gemini-2.0-flash-lite")
+    print("Gemini SDK loaded OK (gemini-2.0-flash-lite)")
 except Exception as _e:
     print(f"WARNING: Gemini unavailable: {_e}")
     GEMINI_MODEL = None
@@ -33,11 +33,11 @@ GEMINI_KEY  = os.environ.get("GEMINI_API_KEY", "")
 EMAIL_TO    = os.environ.get("EMAIL_TO", "")
 EMAIL_FROM  = os.environ.get("EMAIL_FROM", "")
 EMAIL_PASS  = os.environ.get("EMAIL_PASSWORD", "")
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+# SMTP захардкожен — не зависит от GitHub Secrets
+SMTP_SERVER = "smtp.mail.ru"
+SMTP_PORT   = 465  # mail.ru SSL
 TG_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT     = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-SMTP_PORT = 587  # для mail.ru используй 587 (STARTTLS) или 465 (SSL)
 
 # ==================== КОНФИГ ====================
 STYLE_PROMPT = (
@@ -267,11 +267,14 @@ def create_tiktok_video(bg_path, script, output="tiktok_video.mp4"):
 def send_email(subject, body, attachments=None):
     if not all([EMAIL_FROM, EMAIL_TO, EMAIL_PASS]):
         print("WARNING: Email credentials missing — skipping")
+        print(f"  EMAIL_FROM={'set' if EMAIL_FROM else 'EMPTY'}, EMAIL_TO={'set' if EMAIL_TO else 'EMPTY'}, EMAIL_PASSWORD={'set' if EMAIL_PASS else 'EMPTY'}")
         return
+    EMAIL_FROM_REAL = EMAIL_FROM
+    EMAIL_TO_REAL   = EMAIL_TO
 
     msg = MIMEMultipart()
-    msg["From"] = EMAIL_FROM
-    msg["To"] = EMAIL_TO
+    msg["From"] = EMAIL_FROM_REAL
+    msg["To"] = EMAIL_TO_REAL
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
@@ -300,16 +303,16 @@ def send_email(subject, body, attachments=None):
             import ssl
             ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, context=ctx) as s:
-                s.login(EMAIL_FROM, EMAIL_PASS)
+                s.login(EMAIL_FROM_REAL, EMAIL_PASS)
                 s.send_message(msg)
         else:
             with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
                 s.ehlo()
                 s.starttls()
                 s.ehlo()
-                s.login(EMAIL_FROM, EMAIL_PASS)
+                s.login(EMAIL_FROM_REAL, EMAIL_PASS)
                 s.send_message(msg)
-        print(f"Email sent OK to {EMAIL_TO}")
+        print(f"Email sent OK to {EMAIL_TO_REAL}")
     except smtplib.SMTPAuthenticationError as e:
         print(f"EMAIL AUTH FAILED: {e}")
         print("HINT mail.ru: Настройки -> Безопасность -> Пароли для внешних приложений")
@@ -402,3 +405,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
